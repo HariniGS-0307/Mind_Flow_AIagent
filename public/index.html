@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>YouTube MindFlow - AI Content Generator & Visualizer</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+</head>
+<body>
+  <header class="header">
+    <div class="container">
+      <div class="logo">
+        <h1>🧠 YouTube MindFlow</h1>
+        <p>Transform YouTube videos into intelligent summaries, mindmaps & flowcharts</p>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="input-section">
+      <h2>1. Extract & Analyze YouTube Videos</h2>
+      
+      <!-- API Key Input -->
+      <div id="apiKeySection" class="api-key-banner">
+        <p style="margin: 0 0 0.5rem 0; color: var(--text-muted);">🔑 Gemini API Key (Required for AI features)</p>
+        <div style="display: flex; gap: 0.5rem; align-items: center;">
+          <input id="geminiApiKey" type="password" placeholder="Enter your Gemini API key" style="flex: 1;" />
+          <small><a href="https://ai.google.dev/tutorials/setup" target="_blank" style="white-space: nowrap;">Get API key</a></small>
+        </div>
+      </div>
+      <!-- Model Selection -->
+      <div class="model-selection-group" style="margin-bottom: 1.5rem;">
+        <label for="geminiModel" style="display: block; margin-bottom: 0.5rem; color: var(--text-muted); font-size: 0.9rem; font-weight: 500;">🤖 Gemini AI Model Selection:</label>
+        <select id="geminiModel" class="model-select">
+          <option value="">Auto-Detect / Dynamic Failover (Recommended)</option>
+          <option value="gemini-1.5-flash">Gemini 1.5 Flash (Faster & Reliable)</option>
+          <option value="gemini-2.5-flash">Gemini 2.5 Flash (Standard)</option>
+          <option value="gemini-2.0-flash">Gemini 2.0 Flash (Enhanced Context)</option>
+          <option value="gemini-1.5-pro">Gemini 1.5 Pro (Deep Reasoning, slower)</option>
+        </select>
+      </div>
+
+      <!-- Rate Limit Alert Banner -->
+      <div id="rateLimitBanner" class="rate-limit-banner" style="display: none;">
+        <span class="warning-icon">⚠️</span>
+        <div class="banner-content" style="flex: 1;">
+          <h4>Gemini API Quota Exceeded</h4>
+          <p id="rateLimitText">You exceeded your current free tier quota. Please check your plan details.</p>
+          <div style="display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; margin-top: 0.5rem;">
+            <div class="countdown-timer">
+              Please retry in: <strong id="countdownTime">60.0s</strong>
+            </div>
+            <button id="generateOfflineBtn" class="btn btn-sm btn-secondary" style="border-color: rgba(244, 63, 94, 0.4); background: rgba(244, 63, 94, 0.15); color: #fff; font-size: 0.85rem; padding: 0.4rem 0.85rem; border-radius: 8px;">
+              ✨ Generate Offline Report (No API Key Required)
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- YouTube URL Input -->
+      <div class="input-group">
+        <div class="input-wrapper">
+          <input id="videoUrl" type="url" placeholder="Paste YouTube URL or video ID (e.g., https://youtu.be/VIDEO_ID)" />
+          <button id="fetch" class="btn btn-primary">
+            <span>Fetch & Analyze</span>
+          </button>
+        </div>
+      </div>
+      <div id="status" class="status-message" role="status"></div>
+      <div id="loading" class="loading" style="display:none;">
+        <div class="spinner"></div>
+        <p>Processing video with AI (please wait)...</p>
+      </div>
+    </section>
+
+    <section id="results" class="results-section" style="display:none;">
+      <!-- Tabs -->
+      <div class="tabs">
+        <button class="tab-btn active" data-tab="summary">📋 Summary</button>
+        <button class="tab-btn" data-tab="description">📝 Description</button>
+        <button class="tab-btn" data-tab="mindmap">🧩 Mindmap</button>
+        <button class="tab-btn" data-tab="flowchart">📊 Flowchart</button>
+        <button class="tab-btn" data-tab="transcript">📄 Transcript</button>
+      </div>
+
+      <!-- Summary Tab -->
+      <div id="summary" class="tab-content active">
+        <h3>Key Points</h3>
+        <div id="summaryContent" class="summary-content">
+          <ul id="summaryList"></ul>
+        </div>
+      </div>
+
+      <!-- Description Tab -->
+      <div id="description" class="tab-content">
+        <h3>Video Description</h3>
+        <div id="descriptionContainer" class="description-content"></div>
+      </div>
+
+      <!-- Mindmap Tab -->
+      <div id="mindmap" class="tab-content">
+        <h3>Mindmap Visualization</h3>
+        <div id="mindmapContainer" class="diagram-container">
+          <div id="mindmapDiagram" class="mermaid"></div>
+        </div>
+      </div>
+
+      <!-- Flowchart Tab -->
+      <div id="flowchart" class="tab-content">
+        <h3>Process Flowchart</h3>
+        <div id="flowchartContainer" class="diagram-container">
+          <div id="flowchartDiagram" class="mermaid"></div>
+        </div>
+      </div>
+
+      <!-- Transcript Tab -->
+      <div id="transcript" class="tab-content">
+        <h3>Full Transcript</h3>
+        <div class="transcript-controls">
+          <input type="text" id="transcriptSearch" placeholder="Search in transcript..." />
+          <small style="color: var(--text-muted); display: block; margin-top: 0.5rem;">Showing first 100 segments for readability</small>
+        </div>
+        <pre id="transcriptContent" class="transcript-content"></pre>
+      </div>
+
+      <!-- Action Buttons -->
+      <div class="action-buttons">
+        <button id="downloadBtn" class="btn btn-secondary">📥 Download Report (.docx)</button>
+        <button id="newVideoBtn" class="btn btn-secondary">➕ Analyze Another Video</button>
+      </div>
+    </section>
+
+    <!-- Demo Info -->
+    <section class="info-section">
+      <h3>✨ Features</h3>
+      <ul>
+        <li>📹 Extract transcripts from any YouTube video</li>
+        <li>🤖 AI-powered summarization using Gemini</li>
+        <li>🧩 Interactive mindmaps</li>
+        <li>📊 Process flowcharts</li>
+        <li>📥 Download reports</li>
+      </ul>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>

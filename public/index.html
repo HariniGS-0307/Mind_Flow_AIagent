@@ -24,12 +24,18 @@
     <section class="input-section">
       <h2>1. Extract & Analyze YouTube Videos</h2>
       
-      <!-- API Key Input -->
-      <div id="apiKeySection" class="api-key-banner">
-        <p style="margin: 0 0 0.5rem 0; color: var(--text-muted);">🔑 Gemini API Key (Required for AI features)</p>
+      <!-- Shown when server GEMINI_API_KEY is configured (Vercel deployment) -->
+      <div id="serverReadyBanner" class="server-ready-banner" style="display: none;">
+        <span>✅</span>
+        <span>AI features enabled — no API key needed</span>
+      </div>
+
+      <!-- API key field: local development only (never shown on Vercel) -->
+      <div id="apiKeySection" class="api-key-banner" style="display: none;">
+        <p style="margin: 0 0 0.5rem 0; color: var(--text-muted);">🔑 Gemini API Key (local development only)</p>
         <div style="display: flex; gap: 0.5rem; align-items: center;">
           <input id="geminiApiKey" type="password" placeholder="Enter your Gemini API key" style="flex: 1;" />
-          <small><a href="https://ai.google.dev/tutorials/setup" target="_blank" style="white-space: nowrap;">Get API key</a></small>
+          <small><a href="https://aistudio.google.com/apikey" target="_blank" style="white-space: nowrap;">Get API key</a></small>
         </div>
       </div>
       <!-- Model Selection -->
@@ -119,12 +125,13 @@
 
       <!-- Transcript Tab -->
       <div id="transcript" class="tab-content">
-        <h3>Full Transcript</h3>
+        <h3>Video Summary & Transcript</h3>
+        <div id="transcriptSummary" class="transcript-summary glass-card"></div>
         <div class="transcript-controls">
           <input type="text" id="transcriptSearch" placeholder="Search in transcript..." />
-          <small style="color: var(--text-muted); display: block; margin-top: 0.5rem;">Showing first 100 segments for readability</small>
+          <small style="color: var(--text-muted); display: block; margin-top: 0.5rem;">Full transcript with timestamps below</small>
         </div>
-        <pre id="transcriptContent" class="transcript-content"></pre>
+        <div id="transcriptContent" class="transcript-content"></div>
       </div>
 
       <!-- Action Buttons -->

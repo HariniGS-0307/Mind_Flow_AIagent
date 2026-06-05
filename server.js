@@ -3,8 +3,9 @@ import fetch from 'node-fetch';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { Document, Packer, Paragraph, TextRun, Table, TableCell, TableRow, BorderStyle, AlignmentType, WidthType, HeadingLevel } from 'docx';
-import { writeFileSync, existsSync, readFileSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import transcriptHandler from './api/transcript.js';
+import mongoose from 'mongoose';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -29,13 +30,62 @@ if (existsSync('.env')) {
   }
 }
 
+const isVercel = process.env.VERCEL === '1';
+
+function getGeminiApiKey(userKey) {
+  return userKey || process.env.GEMINI_API_KEY || '';
+}
+
+// MongoDB connection (cached for Vercel serverless)
+let isDbConnected = false;
+const connectDB = async () => {
+  const uri = process.env.MONGODB_URI || process.env.MONGO_URI;
+  if (!uri) {
+    console.log('⚠️ No MONGODB_URI or MONGO_URI environment variable found. Database integration is disabled.');
+    return false;
+  }
+  try {
+    if (mongoose.connection.readyState >= 1) {
+      isDbConnected = true;
+      return true;
+    }
+    await mongoose.connect(uri, {
+      dbName: 'youtube-mindmaps',
+      serverSelectionTimeoutMS: 10000,
+      socketTimeoutMS: 45000,
+    });
+    isDbConnected = true;
+    console.log('✅ Connected to MongoDB successfully.');
+    return true;
+  } catch (err) {
+    console.error('❌ MongoDB connection error:', err.message);
+    isDbConnected = false;
+    return false;
+  }
+};
+
+const dbReady = connectDB();
+
+// MindMap Schema & Model
+const mindMapSchema = new mongoose.Schema({
+  videoId: { type: String, required: true },
+  title: { type: String, required: true },
+  author: { type: String },
+  description: { type: String },
+  summary: [String],
+  mindmap: { type: String },
+  flowchart: { type: String },
+  createdAt: { type: Date, default: Date.now }
+});
+const MindMap = mongoose.models.MindMap || mongoose.model('MindMap', mindMapSchema);
+
 const app = express();
 const PORT = process.env.PORT || 3002;
 
 // Middleware
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb' }));
-app.use(express.static('public'));
+app.use(express.static(join(__dirname, 'public')));
 
 // API Routes
 app.get('/api/transcript', async (req, res) => {
@@ -47,18 +97,23 @@ app.get('/api/transcript', async (req, res) => {
 });
 
 // Config Endpoint to share key status with frontend
-app.get('/api/config', (req, res) => {
+app.get('/api/config', async (req, res) => {
+  if (!isDbConnected && (process.env.MONGODB_URI || process.env.MONGO_URI)) {
+    await dbReady;
+  }
   res.json({
-    hasApiKey: !!process.env.GEMINI_API_KEY
+    hasApiKey: !!process.env.GEMINI_API_KEY,
+    isDbConnected,
+    environment: isVercel ? 'vercel' : 'local',
   });
 });
 
 // Diagnostic endpoint to check available models for the API key
 app.get('/api/list-models', async (req, res) => {
   try {
-    const apiKey = req.query.apiKey || process.env.GEMINI_API_KEY;
+    const apiKey = getGeminiApiKey(req.query.apiKey);
     if (!apiKey) {
-      return res.status(400).json({ error: 'API key required' });
+      return res.status(400).json({ error: 'GEMINI_API_KEY environment variable is not configured' });
     }
     const models = await getAvailableModels(apiKey);
     res.json({ models });
@@ -71,11 +126,13 @@ app.get('/api/list-models', async (req, res) => {
 // Generate content with Gemini API (Combined single-call optimization to prevent rate limits)
 app.post('/api/generate-content', async (req, res) => {
   try {
-    const { transcript, videoTitle, apiKey, model } = req.body;
-    const activeApiKey = apiKey || process.env.GEMINI_API_KEY;
+    const { transcript, videoTitle, apiKey, model, videoId } = req.body;
+    const activeApiKey = getGeminiApiKey(apiKey);
 
     if (!activeApiKey) {
-      return res.status(400).json({ error: 'Gemini API key required' });
+      return res.status(400).json({
+        error: 'Gemini API key required. Set GEMINI_API_KEY in Vercel environment variables or enter your key in the app.',
+      });
     }
 
     if (!transcript || transcript.trim().length < 5) {
@@ -112,12 +169,48 @@ Ensure your response is valid JSON and contains only the JSON object. Do not wra
       throw new Error('Failed to generate structured data from Gemini');
     }
 
+    const sanitizedMindmap = sanitizeMermaidDiagram(parsedData.mindmap, 'mindmap');
+    const sanitizedFlowchart = sanitizeMermaidDiagram(parsedData.flowchart, 'flowchart');
+    const parsedSummary = Array.isArray(parsedData.summary) ? parsedData.summary : parseSummaryPoints(parsedData.summary);
+    const cleanDescription = (parsedData.description || '').trim();
+
+    // Fetch metadata from youtube first if not fully passed
+    const oembedResponse = await fetch(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`).catch(() => null);
+    let authorName = 'Unknown';
+    if (oembedResponse && oembedResponse.ok) {
+      const oembedData = await oembedResponse.json().catch(() => ({}));
+      authorName = oembedData.author_name || 'Unknown';
+    }
+
+    // Save successfully generated content to MongoDB
+    if (isDbConnected && videoId) {
+      try {
+        await MindMap.findOneAndUpdate(
+          { videoId },
+          {
+            videoId,
+            title: videoTitle,
+            author: authorName,
+            description: cleanDescription,
+            summary: parsedSummary,
+            mindmap: sanitizedMindmap,
+            flowchart: sanitizedFlowchart,
+            createdAt: new Date()
+          },
+          { upsert: true, new: true }
+        );
+        console.log('💾 Successfully saved generated mindmap to database.');
+      } catch (dbErr) {
+        console.error('⚠️ Failed to save mindmap to database:', dbErr.message);
+      }
+    }
+
     res.json({
       success: true,
-      description: (parsedData.description || '').trim(),
-      summary: Array.isArray(parsedData.summary) ? parsedData.summary : parseSummaryPoints(parsedData.summary),
-      mindmap: sanitizeMermaidDiagram(parsedData.mindmap, 'mindmap'),
-      flowchart: sanitizeMermaidDiagram(parsedData.flowchart, 'flowchart'),
+      description: cleanDescription,
+      summary: parsedSummary,
+      mindmap: sanitizedMindmap,
+      flowchart: sanitizedFlowchart,
     });
   } catch (error) {
     console.error('Generate content error:', error);
@@ -126,44 +219,142 @@ Ensure your response is valid JSON and contains only the JSON object. Do not wra
 });
 
 // Generate offline/mock content when API keys are rate-limited or unavailable
-app.post('/api/generate-mock', (req, res) => {
+app.post('/api/generate-mock', async (req, res) => {
   try {
-    const { transcript, videoTitle } = req.body;
+    const { transcript, videoTitle, videoId } = req.body;
     
     if (!transcript || transcript.trim().length < 5) {
       return res.status(400).json({ error: 'Transcript too short or empty' });
     }
 
-    // Extract sentences from transcript for summary points
-    const sentences = transcript
-      .split(/[.!?]+/)
+    const cleanTranscript = transcript.replace(/\[[\d:]+\]/g, '').trim();
+
+    let sentences = cleanTranscript
+      .split(/[.!?\n]+/)
       .map(s => s.trim())
-      .filter(s => s.length > 25 && !s.includes('['))
-      .slice(0, 5);
+      .filter(s => s.length > 8 && !/^\(.*\)$/.test(s))
+      .slice(0, 7);
+
+    if (sentences.length <= 1 && cleanTranscript.length > 20) {
+      const words = cleanTranscript.split(/\s+/).filter(Boolean);
+      const chunkSize = Math.max(4, Math.ceil(words.length / 4));
+      sentences = [];
+      for (let i = 0; i < words.length; i += chunkSize) {
+        const chunk = words.slice(i, i + chunkSize).join(' ');
+        if (chunk.length > 8) sentences.push(chunk);
+      }
+    }
 
     const summaryPoints = sentences.length > 0
-      ? sentences.map(s => s.charAt(0).toUpperCase() + s.slice(1) + '.')
+      ? sentences.map(s => {
+          const capped = s.charAt(0).toUpperCase() + s.slice(1);
+          return capped.endsWith('.') ? capped : capped + '.';
+        })
       : [
-          "Successfully parsed the YouTube video transcript segments.",
-          "Identified key discussion themes and timestamps.",
-          "Prepared structured breakdown of visual elements."
+          `The video "${videoTitle || 'content'}" covers its main topic in a brief format.`,
+          'Key ideas were extracted directly from the available transcript.',
+          'Visual diagrams below reflect the structure of the spoken content.',
         ];
 
     const cleanTitle = (videoTitle || 'YouTube Video')
       .replace(/[^a-zA-Z0-9 ]/g, '')
       .trim();
-    const titleWords = cleanTitle.split(' ').filter(w => w.length > 3).slice(0, 3);
+    const titleWords = cleanTitle.split(' ').filter(w => w.length > 2).slice(0, 4);
     const rootNode = titleWords.join(' ') || 'Video Content';
+
+    const topicWords = cleanTranscript
+      .split(/\s+/)
+      .map(w => w.replace(/[^a-zA-Z]/g, ''))
+      .filter(w => w.length > 4)
+      .slice(0, 6);
+
+    const branchA = topicWords[0] || 'Introduction';
+    const branchB = topicWords[1] || 'Main Topic';
+    const branchC = topicWords[2] || 'Conclusion';
+
+    const mockDescription = sentences.length > 0
+      ? `This video "${videoTitle || 'discusses'}" ${sentences[0].toLowerCase()}${sentences.length > 1 ? ` It also covers ${sentences.slice(1, 3).join(' ').toLowerCase()}` : ''}.`
+      : `A structured summary of "${videoTitle || 'the video'}" generated from the available transcript content.`;
+
+    const mockMindmap = `mindmap\n  root(("${rootNode}"))\n    ${branchA}\n      Key Point 1\n      Key Point 2\n    ${branchB}\n      Details\n      Examples\n    ${branchC}\n      Summary\n      Takeaways`;
+    const mockFlowchart = sentences.length >= 2
+      ? sentences.slice(0, Math.min(sentences.length, 5)).map((s, i) => {
+          const label = s.replace(/"/g, "'").substring(0, 50);
+          const id = String.fromCharCode(65 + i);
+          const nextId = String.fromCharCode(65 + i + 1);
+          const arrow = i < Math.min(sentences.length, 5) - 1 ? `    ${id} --> ${nextId}\n` : '';
+          return `    ${id}["${label}"]\n${arrow}`;
+        }).join('')
+      : `flowchart TD\n    A["Introduction"] --> B["Main Content"]\n    B --> C["Conclusion"]`;
+
+    const formattedFlowchart = mockFlowchart.startsWith('flowchart')
+      ? mockFlowchart
+      : `flowchart TD\n${mockFlowchart}`;
+
+    // Save mock content to database
+    if (isDbConnected && videoId) {
+      try {
+        await MindMap.findOneAndUpdate(
+          { videoId },
+          {
+            videoId,
+            title: videoTitle || 'Offline Demo Video',
+            author: 'Offline Generator',
+            description: mockDescription,
+            summary: summaryPoints,
+            mindmap: mockMindmap,
+            flowchart: formattedFlowchart,
+            createdAt: new Date()
+          },
+          { upsert: true, new: true }
+        );
+        console.log('💾 Successfully saved offline mindmap to database.');
+      } catch (dbErr) {
+        console.error('⚠️ Failed to save offline mindmap to database:', dbErr.message);
+      }
+    }
 
     res.json({
       success: true,
-      description: `Offline/Demo Mode: This summary of "${videoTitle || 'the video'}" was generated offline because the Gemini API free tier request limit was reached. It serves as a fully functional placeholder so you can test document downloads and visual rendering.`,
+      description: mockDescription,
       summary: summaryPoints,
-      mindmap: `mindmap\n  root(("${rootNode}"))\n    Overview\n      Introduction\n      Key Concepts\n    Structure\n      Main Discussion\n      Key Examples\n    Conclusion\n      Takeaways\n      Closing Summary`,
-      flowchart: `flowchart TD\n    A["1. Intro & Context"] --> B["2. Detailed Explanation"]\n    B --> C["3. Practice Examples"]\n    C --> D["4. Summary & Wrap-up"]`
+      mindmap: mockMindmap,
+      flowchart: formattedFlowchart
     });
   } catch (error) {
     console.error('Generate mock error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get history of saved mindmaps
+app.get('/api/history', async (req, res) => {
+  try {
+    if (!isDbConnected) {
+      return res.json({ success: true, history: [] });
+    }
+    const history = await MindMap.find()
+      .sort({ createdAt: -1 })
+      .limit(10)
+      .select('videoId title author createdAt');
+    res.json({ success: true, history });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get detailed saved mindmap by videoId
+app.get('/api/history/:videoId', async (req, res) => {
+  try {
+    if (!isDbConnected) {
+      return res.status(400).json({ error: 'Database not connected' });
+    }
+    const saved = await MindMap.findOne({ videoId: req.params.videoId });
+    if (!saved) {
+      return res.status(404).json({ error: 'Mindmap not found' });
+    }
+    res.json({ success: true, data: saved });
+  } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
@@ -694,71 +885,19 @@ app.get('*', (req, res) => {
   res.sendFile(join(__dirname, 'public', 'index.html'));
 });
 
-// Start server
-app.listen(PORT, () => {
-  console.log(`🚀 Server running at http://localhost:${PORT}`);
-  console.log(`📝 API: http://localhost:${PORT}/api`);
-  console.log(`📊 Ready for video analysis!`);
-});
-
-// Startup self-diagnostic test to capture docx generation errors
-async function testDocxStartup() {
-  try {
-    console.log('📝 Diagnostic: Testing DOCX generation on startup...');
-    const doc = new Document({
-      sections: [
-        {
-          children: [
-            new Paragraph({
-              heading: HeadingLevel.HEADING_1,
-              alignment: AlignmentType.CENTER,
-              spacing: { after: 200 },
-              children: [
-                new TextRun({
-                  text: 'Test Title',
-                  bold: true,
-                  size: 32,
-                })
-              ]
-            }),
-            new Table({
-              rows: [
-                new TableRow({
-                  children: [
-                    new TableCell({ 
-                      children: [
-                        new Paragraph({ 
-                          children: [
-                            new TextRun({ text: 'Author:', bold: true })
-                          ] 
-                        })
-                      ] 
-                    }),
-                    new TableCell({ 
-                      children: [
-                        new Paragraph({ 
-                          children: [
-                            new TextRun({ text: 'Test Author' })
-                          ] 
-                        })
-                      ] 
-                    }),
-                  ],
-                }),
-              ],
-              width: { size: 100, type: WidthType.PERCENTAGE },
-            })
-          ],
-        },
-      ],
-    });
-
-    const buffer = await Packer.toBuffer(doc);
-    writeFileSync('docx-test-result.txt', `Success! DOCX generated successfully on startup. Buffer size: ${buffer.length} bytes.`);
-    console.log('✅ Diagnostic: DOCX generation test passed.');
-  } catch (error) {
-    console.error('❌ Diagnostic: DOCX generation test failed:', error);
-    writeFileSync('docx-test-result.txt', `Failed!\nError: ${error.message}\nStack: ${error.stack}`);
-  }
+// Start server locally only (Vercel uses serverless export)
+if (!isVercel) {
+  app.listen(PORT, () => {
+    console.log(`🚀 Server running at http://localhost:${PORT}`);
+    console.log(`📝 API: http://localhost:${PORT}/api`);
+    console.log(`📊 Ready for video analysis!`);
+    if (!process.env.GEMINI_API_KEY) {
+      console.warn('⚠️ GEMINI_API_KEY is not set. AI features will require a user-provided key.');
+    }
+    if (!process.env.MONGODB_URI && !process.env.MONGO_URI) {
+      console.warn('⚠️ MONGODB_URI is not set. Database history is disabled.');
+    }
+  });
 }
-testDocxStartup();
+
+export default app;

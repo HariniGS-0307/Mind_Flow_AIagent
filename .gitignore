@@ -1,0 +1,7 @@
+node_modules/
+.env
+.env.local
+.vercel
+docx-test-result.txt
+*.log
+.DS_Store

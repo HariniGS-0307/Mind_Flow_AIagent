@@ -138,6 +138,20 @@ main.container {
 }
 
 /* API Key banner */
+.server-ready-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  background: rgba(34, 197, 94, 0.08);
+  border: 1px solid rgba(34, 197, 94, 0.3);
+  border-radius: 12px;
+  padding: 0.9rem 1.25rem;
+  margin-bottom: 1.75rem;
+  color: #86efac;
+  font-size: 0.95rem;
+  font-weight: 500;
+}
+
 .api-key-banner {
   background: rgba(99, 102, 241, 0.05);
   border: 1px solid rgba(99, 102, 241, 0.25);
@@ -509,6 +523,28 @@ main.container {
   outline: none;
   border-color: var(--primary);
   box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2);
+}
+
+.transcript-summary {
+  margin-bottom: 1.5rem;
+  padding: 1.25rem 1.5rem;
+}
+
+.transcript-summary-text {
+  color: #e2e8f0;
+  line-height: 1.7;
+  margin: 0 0 1rem 0;
+}
+
+.transcript-summary-list {
+  margin: 0;
+  padding-left: 1.25rem;
+  color: #cbd5e1;
+}
+
+.transcript-summary-list li {
+  margin-bottom: 0.5rem;
+  line-height: 1.6;
 }
 
 .transcript-content {

@@ -41,30 +41,77 @@ const rateLimitText = document.getElementById('rateLimitText');
 const countdownTime = document.getElementById('countdownTime');
 const generateOfflineBtn = document.getElementById('generateOfflineBtn');
 
-// Check if API key is configured on server
+// Server config (Vercel uses GEMINI_API_KEY env var — no user key needed)
 let hasServerApiKey = false;
+let isDbConnected = false;
+let isVercelDeployment = false;
+let configReady = false;
+
+const serverReadyBanner = document.getElementById('serverReadyBanner');
+
+function updateApiKeyVisibility() {
+  if (!apiKeySection) return;
+
+  // Never ask for API key on Vercel — server must provide GEMINI_API_KEY
+  if (isVercelDeployment || hasServerApiKey) {
+    apiKeySection.style.display = 'none';
+    if (serverReadyBanner && hasServerApiKey) {
+      serverReadyBanner.style.display = 'block';
+    }
+    return;
+  }
+
+  if (serverReadyBanner) serverReadyBanner.style.display = 'none';
+  if (!state.apiKey) {
+    apiKeySection.style.display = 'block';
+  } else {
+    apiKeySection.style.display = 'none';
+  }
+}
+
 async function checkServerConfig() {
   try {
     const res = await fetch('/api/config');
     if (res.ok) {
       const data = await res.json();
-      hasServerApiKey = data.hasApiKey;
+      hasServerApiKey = !!data.hasApiKey;
+      isDbConnected = !!data.isDbConnected;
+      isVercelDeployment = data.environment === 'vercel';
+
       if (hasServerApiKey) {
-        if (apiKeySection) apiKeySection.style.display = 'none';
-      } else if (!state.apiKey) {
-        if (apiKeySection) apiKeySection.style.display = 'block';
+        state.apiKey = '';
+        localStorage.removeItem('geminiApiKey');
+        if (apiKeyInput) apiKeyInput.value = '';
       }
-      // Populate available models
-      loadAvailableModels();
+
+      updateApiKeyVisibility();
+
+      if (hasServerApiKey || state.apiKey) {
+        loadAvailableModels();
+      }
     }
   } catch (e) {
     console.error('Failed to load server config:', e);
+    if (!isVercelDeployment && apiKeySection && !state.apiKey) {
+      apiKeySection.style.display = 'block';
+    }
+  } finally {
+    configReady = true;
+    fetchBtn.disabled = false;
   }
 }
-checkServerConfig();
 
-// Initialize API key from localStorage
-if (state.apiKey) {
+const configPromise = checkServerConfig();
+
+async function ensureConfigReady() {
+  await configPromise;
+}
+
+// Disable fetch until server config is loaded (prevents false API key prompts)
+fetchBtn.disabled = true;
+
+// Initialize API key from localStorage (local dev only, before config loads)
+if (state.apiKey && apiKeyInput) {
   apiKeyInput.value = state.apiKey;
 }
 
@@ -131,13 +178,45 @@ document.getElementById('downloadBtn')?.addEventListener('click', downloadReport
 document.getElementById('newVideoBtn')?.addEventListener('click', resetApp);
 generateOfflineBtn?.addEventListener('click', handleGenerateOffline);
 
+async function generateOfflineContent() {
+  if (!state.transcript) {
+    throw new Error('No transcript loaded');
+  }
+
+  const transcriptText = state.transcript.transcript
+    .map(t => t.text)
+    .join(' ');
+
+  const response = await fetch('/api/generate-mock', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      transcript: transcriptText,
+      videoTitle: state.transcript.title || 'YouTube Video',
+      videoId: state.videoId,
+    })
+  });
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.error || `Server Error: ${response.status}`);
+  }
+
+  const content = await response.json();
+  state.description = content.description;
+  state.summary = content.summary;
+  state.mindmap = content.mindmap;
+  state.flowchart = content.flowchart;
+  displayGeneratedContent();
+  return content;
+}
+
 async function handleGenerateOffline() {
   if (!state.transcript) {
     showStatus('⚠️ No transcript loaded. Please fetch a video first.', 'error');
     return;
   }
-  
-  // Clear countdown timer
+
   if (countdownInterval) {
     clearInterval(countdownInterval);
     countdownInterval = null;
@@ -146,48 +225,23 @@ async function handleGenerateOffline() {
     rateLimitBanner.style.display = 'none';
   }
   fetchBtn.disabled = false;
-  
+
   showLoading(true);
-  showStatus('✨ Generating offline mock report and visual diagrams...', 'info');
-  
+  showStatus('✨ Generating offline report and visual diagrams...', 'info');
+
   try {
-    const transcriptText = state.transcript.transcript
-      .map(t => t.text)
-      .join(' ');
-      
-    const response = await fetch('/api/generate-mock', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        transcript: transcriptText,
-        videoTitle: state.transcript.title || 'YouTube Video'
-      })
-    });
-    
-    if (!response.ok) {
-      const err = await response.json().catch(() => ({}));
-      throw new Error(err.error || `Server Error: ${response.status}`);
-    }
-    
-    const content = await response.json();
-    
-    state.description = content.description;
-    state.summary = content.summary;
-    state.mindmap = content.mindmap;
-    state.flowchart = content.flowchart;
-    
-    showStatus('✓ Offline demo report generated! Click tabs to view or Download Report.', 'success');
-    displayGeneratedContent();
+    await generateOfflineContent();
+    showStatus('✓ Offline report generated! Click tabs to view or Download Report.', 'success');
   } catch (error) {
     console.error('Offline generation error:', error);
     showStatus(`❌ Failed to generate offline content: ${error.message}`, 'error');
+    displayBasicContent();
   } finally {
     showLoading(false);
   }
 }
 
-// Listen to API Key input directly to load models dynamically
-apiKeyInput.addEventListener('input', debounce(() => {
+apiKeyInput?.addEventListener('input', debounce(() => {
   const apiKey = apiKeyInput.value.trim();
   localStorage.setItem('geminiApiKey', apiKey);
   state.apiKey = apiKey;
@@ -214,15 +268,22 @@ document.getElementById('transcriptSearch')?.addEventListener('input', (e) => {
 
 // Main fetch handler
 async function handleFetch() {
+  await ensureConfigReady();
+
   const url = videoUrlInput.value.trim();
-  const apiKey = apiKeyInput.value.trim();
+  const apiKey = hasServerApiKey ? '' : (apiKeyInput?.value.trim() || '');
 
   if (!url) {
     showStatus('Enter a YouTube URL or video ID', 'error');
     return;
   }
 
-  if (!apiKey && !hasServerApiKey) {
+  if (isVercelDeployment && !hasServerApiKey) {
+    showStatus('⚠️ AI is not configured. Add GEMINI_API_KEY in Vercel → Settings → Environment Variables, then redeploy.', 'error');
+    return;
+  }
+
+  if (!hasServerApiKey && !apiKey) {
     showStatus('⚠️ Please enter your Gemini API key to generate summaries and diagrams', 'error');
     if (apiKeySection) {
       apiKeySection.style.display = 'block';
@@ -231,8 +292,7 @@ async function handleFetch() {
     return;
   }
 
-  // Save API key to localStorage if user entered one
-  if (apiKey) {
+  if (!hasServerApiKey && apiKey) {
     localStorage.setItem('geminiApiKey', apiKey);
     state.apiKey = apiKey;
   }
@@ -316,15 +376,15 @@ async function generateAIContent(apiKey) {
     showLoading(true);
     showStatus('🤖 Generating AI summaries, mindmap & flowchart (15-20 seconds)...', 'info');
 
-    // Call backend to generate content using Gemini
     const response = await fetch('/api/generate-content', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         transcript: transcriptText,
         videoTitle: state.transcript.title || 'YouTube Video',
-        apiKey: apiKey,
+        apiKey: hasServerApiKey ? undefined : (apiKey || undefined),
         model: state.model,
+        videoId: state.videoId,
       }),
     });
 
@@ -359,10 +419,11 @@ async function generateAIContent(apiKey) {
     console.error('AI generation error:', error);
     if (rateLimitBanner && rateLimitBanner.style.display === 'flex') {
       showStatus(`⚠️ Rate limit active. Please wait for the countdown to complete before retrying.`, 'error');
+      displayBasicContent();
     } else {
-      showStatus(`❌ Failed to generate AI content: ${error.message}`, 'error');
+      showStatus(`⚠️ AI unavailable (${error.message}). Generating offline summary...`, 'info');
+      await generateOfflineContent();
     }
-    displayBasicContent();
   } finally {
     showLoading(false);
   }
@@ -380,6 +441,10 @@ function displayGeneratedContent() {
   displayTranscript();
   resultsSection.style.display = 'block';
   switchTab('summary');
+  setTimeout(() => {
+    displayMindmap();
+    displayFlowchart();
+  }, 100);
 }
 
 function displayDescription() {
@@ -455,30 +520,46 @@ function displayFlowchart() {
 }
 
 function displayTranscript() {
+  const transcriptSummary = document.getElementById('transcriptSummary');
   const transcriptContent = document.getElementById('transcriptContent');
-  if (state.transcript && state.transcript.transcript) {
-    const limited = state.transcript.transcript;
-    
-    // Create elements instead of raw pre formatting for better visual appearance
-    transcriptContent.innerHTML = '';
-    
-    limited.forEach(t => {
-      const segmentDiv = document.createElement('div');
-      segmentDiv.className = 'transcript-segment';
-      
-      const timeSpan = document.createElement('span');
-      timeSpan.className = 'timestamp-badge';
-      timeSpan.textContent = formatTime(t.start);
-      
-      const textSpan = document.createElement('span');
-      textSpan.className = 'segment-text';
-      textSpan.textContent = t.text;
-      
-      segmentDiv.appendChild(timeSpan);
-      segmentDiv.appendChild(textSpan);
-      transcriptContent.appendChild(segmentDiv);
-    });
+  if (!state.transcript || !state.transcript.transcript) return;
+
+  if (transcriptSummary) {
+    const summaryHtml = [];
+    if (state.description) {
+      summaryHtml.push(`<p class="transcript-summary-text">${state.description}</p>`);
+    }
+    if (state.summary && state.summary.length > 0) {
+      summaryHtml.push('<ul class="transcript-summary-list">');
+      const points = Array.isArray(state.summary) ? state.summary : [state.summary];
+      points.forEach(point => {
+        const clean = String(point).replace(/^[-•*]\s*/, '').trim();
+        if (clean) summaryHtml.push(`<li>${clean}</li>`);
+      });
+      summaryHtml.push('</ul>');
+    }
+    transcriptSummary.innerHTML = summaryHtml.length > 0
+      ? summaryHtml.join('')
+      : '<p class="transcript-summary-text">Summary will appear here after analysis completes.</p>';
   }
+
+  transcriptContent.innerHTML = '';
+  state.transcript.transcript.forEach(t => {
+    const segmentDiv = document.createElement('div');
+    segmentDiv.className = 'transcript-segment';
+
+    const timeSpan = document.createElement('span');
+    timeSpan.className = 'timestamp-badge';
+    timeSpan.textContent = formatTime(t.start);
+
+    const textSpan = document.createElement('span');
+    textSpan.className = 'segment-text';
+    textSpan.textContent = t.text;
+
+    segmentDiv.appendChild(timeSpan);
+    segmentDiv.appendChild(textSpan);
+    transcriptContent.appendChild(segmentDiv);
+  });
 }
 
 function searchTranscript(query) {

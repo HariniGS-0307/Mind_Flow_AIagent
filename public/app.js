@@ -6,8 +6,8 @@ const state = {
   summary: null,
   mindmap: null,
   flowchart: null,
-  apiKey: localStorage.getItem('geminiApiKey') || '',
-  model: localStorage.getItem('geminiModel') || '',
+  apiKey: localStorage.getItem('openaiApiKey') || localStorage.getItem('geminiApiKey') || '',
+  model: localStorage.getItem('openaiModel') || localStorage.getItem('geminiModel') || '',
 };
 
 // Initialize Mermaid
@@ -31,17 +31,17 @@ const fetchBtn = document.getElementById('fetch');
 const statusDiv = document.getElementById('status');
 const loadingDiv = document.getElementById('loading');
 const resultsSection = document.getElementById('results');
-const apiKeyInput = document.getElementById('geminiApiKey');
+const apiKeyInput = document.getElementById('openaiApiKey');
 const apiKeySection = document.getElementById('apiKeySection');
 const tabButtons = document.querySelectorAll('.tab-btn');
 const tabContents = document.querySelectorAll('.tab-content');
-const modelSelect = document.getElementById('geminiModel');
+const modelSelect = document.getElementById('openaiModel');
 const rateLimitBanner = document.getElementById('rateLimitBanner');
 const rateLimitText = document.getElementById('rateLimitText');
 const countdownTime = document.getElementById('countdownTime');
 const generateOfflineBtn = document.getElementById('generateOfflineBtn');
 
-// Server config (Vercel uses GEMINI_API_KEY env var — no user key needed)
+// Server config (Vercel uses OPENAI_API_KEY env var — no user key needed)
 let hasServerApiKey = false;
 let isDbConnected = false;
 let isVercelDeployment = false;
@@ -61,7 +61,7 @@ function updateApiKeyVisibility(apiKeyValid = true, apiKeyError = null, apiKeyCo
         serverReadyBanner.style.display = 'flex';
       } else if (apiKeyConfigured && !apiKeyValid) {
         serverReadyBanner.className = 'server-ready-banner server-error-banner';
-        serverReadyBanner.innerHTML = `<span>⚠️</span><span>${apiKeyError || 'Server GEMINI_API_KEY is invalid. Create a new key at aistudio.google.com/apikey and update Vercel env vars.'}</span>`;
+        serverReadyBanner.innerHTML = `<span>⚠️</span><span>${apiKeyError || 'Server OPENAI_API_KEY is invalid. Get a key at platform.openai.com/api-keys and set it in Vercel env vars (no quotes).'}</span>`;
         serverReadyBanner.style.display = 'flex';
       } else {
         serverReadyBanner.style.display = 'none';
@@ -89,7 +89,7 @@ async function checkServerConfig() {
 
       if (data.hasApiKey) {
         state.apiKey = '';
-        localStorage.removeItem('geminiApiKey');
+        localStorage.removeItem('openaiApiKey');
         if (apiKeyInput) apiKeyInput.value = '';
       }
 
@@ -153,8 +153,9 @@ async function loadAvailableModels() {
         const option = document.createElement('option');
         option.value = model;
         let displayName = model;
-        if (model.includes('flash')) displayName = `${model} (Flash)`;
-        if (model.includes('pro')) displayName = `${model} (Pro)`;
+        if (model.includes('mini')) displayName = `${model} (Mini)`;
+        else if (model.includes('turbo')) displayName = `${model} (Turbo)`;
+        else if (model.includes('4o')) displayName = `${model} (4o)`;
         option.textContent = displayName;
         modelSelect.appendChild(option);
       });
@@ -252,7 +253,7 @@ async function handleGenerateOffline() {
 
 apiKeyInput?.addEventListener('input', debounce(() => {
   const apiKey = apiKeyInput.value.trim();
-  localStorage.setItem('geminiApiKey', apiKey);
+  localStorage.setItem('openaiApiKey', apiKey);
   state.apiKey = apiKey;
   loadAvailableModels();
 }, 500));
@@ -260,7 +261,7 @@ apiKeyInput?.addEventListener('input', debounce(() => {
 // Listen to model selector changes
 modelSelect.addEventListener('change', (e) => {
   const model = e.target.value;
-  localStorage.setItem('geminiModel', model);
+  localStorage.setItem('openaiModel', model);
   state.model = model;
 });
 
@@ -288,12 +289,12 @@ async function handleFetch() {
   }
 
   if (isVercelDeployment && !hasServerApiKey) {
-    showStatus('⚠️ GEMINI_API_KEY on Vercel is missing or invalid. Create a new key at aistudio.google.com/apikey → Vercel Settings → Environment Variables → redeploy.', 'error');
+    showStatus('⚠️ OPENAI_API_KEY on Vercel is missing or invalid. Get a key at platform.openai.com/api-keys → Vercel Settings → Environment Variables → redeploy.', 'error');
     return;
   }
 
   if (!hasServerApiKey && !apiKey) {
-    showStatus('⚠️ Please enter your Gemini API key to generate summaries and diagrams', 'error');
+    showStatus('⚠️ Please enter your OpenAI API key to generate summaries and diagrams', 'error');
     if (apiKeySection) {
       apiKeySection.style.display = 'block';
       apiKeySection.classList.add('pulse-border');
@@ -302,7 +303,7 @@ async function handleFetch() {
   }
 
   if (!hasServerApiKey && apiKey) {
-    localStorage.setItem('geminiApiKey', apiKey);
+    localStorage.setItem('openaiApiKey', apiKey);
     state.apiKey = apiKey;
   }
 
@@ -429,7 +430,7 @@ async function generateAIContent(apiKey) {
     if (rateLimitBanner && rateLimitBanner.style.display === 'flex') {
       showStatus(`⚠️ Rate limit active. Please wait for the countdown to complete before retrying.`, 'error');
       displayBasicContent();
-    } else if (error.message.includes('GEMINI_API_KEY') || error.message.includes('invalid') || error.message.includes('401')) {
+    } else if (error.message.includes('OPENAI_API_KEY') || error.message.includes('invalid') || error.message.includes('401')) {
       showStatus(`❌ ${error.message}`, 'error');
       displayBasicContent();
     } else {

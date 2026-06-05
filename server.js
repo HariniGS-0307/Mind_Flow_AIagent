@@ -7,10 +7,10 @@ import { existsSync, readFileSync } from 'fs';
 import transcriptHandler from './api/transcript.js';
 import {
   normalizeApiKey,
-  validateGeminiApiKey,
+  validateOpenAIApiKey,
   getAvailableModels,
-  generateWithGemini,
-} from './api/gemini.js';
+  generateWithOpenAI,
+} from './api/openai.js';
 import mongoose from 'mongoose';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -38,19 +38,26 @@ if (existsSync('.env')) {
 
 const isVercel = process.env.VERCEL === '1';
 
-function getGeminiApiKey(userKey) {
-  return normalizeApiKey(userKey || process.env.GEMINI_API_KEY || '');
+function getOpenAIApiKey(userKey) {
+  return normalizeApiKey(userKey || process.env.OPENAI_API_KEY || '');
 }
 
 let apiKeyValidation = null;
 async function getApiKeyValidation() {
-  const key = getGeminiApiKey();
-  if (!key) return { valid: false, error: 'GEMINI_API_KEY is not set' };
-  if (!apiKeyValidation || apiKeyValidation._key !== key) {
-    const result = await validateGeminiApiKey(key);
-    apiKeyValidation = { ...result, _key: key };
+  const key = getOpenAIApiKey();
+  if (!key) return { valid: false, error: 'OPENAI_API_KEY is not set' };
+
+  if (apiKeyValidation?.valid && apiKeyValidation._key === key) {
+    return apiKeyValidation;
   }
-  return apiKeyValidation;
+
+  const result = await validateOpenAIApiKey(key);
+  if (result.valid) {
+    apiKeyValidation = { ...result, _key: key };
+  } else {
+    apiKeyValidation = null;
+  }
+  return result;
 }
 
 // MongoDB connection (cached for Vercel serverless)
@@ -118,7 +125,7 @@ app.get('/api/config', async (req, res) => {
   if (!isDbConnected && (process.env.MONGODB_URI || process.env.MONGO_URI)) {
     await dbReady;
   }
-  const hasApiKey = !!getGeminiApiKey();
+  const hasApiKey = !!getOpenAIApiKey();
   let apiKeyValid = false;
   let apiKeyError = null;
   let keyFormat = null;
@@ -143,9 +150,9 @@ app.get('/api/config', async (req, res) => {
 // Diagnostic endpoint to check available models for the API key
 app.get('/api/list-models', async (req, res) => {
   try {
-    const apiKey = getGeminiApiKey(req.query.apiKey);
+    const apiKey = getOpenAIApiKey(req.query.apiKey);
     if (!apiKey) {
-      return res.status(400).json({ error: 'GEMINI_API_KEY environment variable is not configured' });
+      return res.status(400).json({ error: 'OPENAI_API_KEY environment variable is not configured' });
     }
     const models = await getAvailableModels(apiKey);
     res.json({ models });
@@ -155,15 +162,15 @@ app.get('/api/list-models', async (req, res) => {
 });
 
 
-// Generate content with Gemini API (Combined single-call optimization to prevent rate limits)
+// Generate content with OpenAI API (single-call optimization)
 app.post('/api/generate-content', async (req, res) => {
   try {
     const { transcript, videoTitle, apiKey, model, videoId } = req.body;
-    const activeApiKey = getGeminiApiKey(apiKey);
+    const activeApiKey = getOpenAIApiKey(apiKey);
 
     if (!activeApiKey) {
       return res.status(400).json({
-        error: 'Gemini API key required. Set GEMINI_API_KEY in Vercel environment variables or enter your key in the app.',
+        error: 'OpenAI API key required. Set OPENAI_API_KEY in Vercel environment variables or enter your key in the app.',
       });
     }
 
@@ -192,18 +199,18 @@ You MUST return your output as a valid JSON object matching the following schema
 
 Ensure your response is valid JSON and contains only the JSON object. Do not wrap it in markdown backticks.`;
 
-    const validation = await validateGeminiApiKey(activeApiKey);
+    const validation = await validateOpenAIApiKey(activeApiKey);
     if (!validation.valid) {
-      return res.status(401).json({ error: validation.error || 'Invalid GEMINI_API_KEY' });
+      return res.status(401).json({ error: validation.error || 'Invalid OPENAI_API_KEY' });
     }
 
-    console.log('Sending single optimized API call to Gemini...');
-    const rawResponse = await generateWithGemini(activeApiKey, combinedPrompt, model, 3);
+    console.log('Sending single optimized API call to OpenAI...');
+    const rawResponse = await generateWithOpenAI(activeApiKey, combinedPrompt, model, 3);
     
     // Parse JSON safely
     const parsedData = parseJsonResponse(rawResponse);
     if (!parsedData) {
-      throw new Error('Failed to generate structured data from Gemini');
+      throw new Error('Failed to generate structured data from OpenAI');
     }
 
     const sanitizedMindmap = sanitizeMermaidDiagram(parsedData.mindmap, 'mindmap');
@@ -755,8 +762,8 @@ if (!isVercel) {
     console.log(`🚀 Server running at http://localhost:${PORT}`);
     console.log(`📝 API: http://localhost:${PORT}/api`);
     console.log(`📊 Ready for video analysis!`);
-    if (!process.env.GEMINI_API_KEY) {
-      console.warn('⚠️ GEMINI_API_KEY is not set. AI features will require a user-provided key.');
+    if (!process.env.OPENAI_API_KEY) {
+      console.warn('⚠️ OPENAI_API_KEY is not set. AI features will require a user-provided key.');
     }
     if (!process.env.MONGODB_URI && !process.env.MONGO_URI) {
       console.warn('⚠️ MONGODB_URI is not set. Database history is disabled.');

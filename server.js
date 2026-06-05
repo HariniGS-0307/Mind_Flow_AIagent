@@ -5,6 +5,12 @@ import { dirname, join } from 'path';
 import { Document, Packer, Paragraph, TextRun, Table, TableCell, TableRow, BorderStyle, AlignmentType, WidthType, HeadingLevel } from 'docx';
 import { existsSync, readFileSync } from 'fs';
 import transcriptHandler from './api/transcript.js';
+import {
+  normalizeApiKey,
+  validateGeminiApiKey,
+  getAvailableModels,
+  generateWithGemini,
+} from './api/gemini.js';
 import mongoose from 'mongoose';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -33,7 +39,18 @@ if (existsSync('.env')) {
 const isVercel = process.env.VERCEL === '1';
 
 function getGeminiApiKey(userKey) {
-  return userKey || process.env.GEMINI_API_KEY || '';
+  return normalizeApiKey(userKey || process.env.GEMINI_API_KEY || '');
+}
+
+let apiKeyValidation = null;
+async function getApiKeyValidation() {
+  const key = getGeminiApiKey();
+  if (!key) return { valid: false, error: 'GEMINI_API_KEY is not set' };
+  if (!apiKeyValidation || apiKeyValidation._key !== key) {
+    const result = await validateGeminiApiKey(key);
+    apiKeyValidation = { ...result, _key: key };
+  }
+  return apiKeyValidation;
 }
 
 // MongoDB connection (cached for Vercel serverless)
@@ -101,8 +118,23 @@ app.get('/api/config', async (req, res) => {
   if (!isDbConnected && (process.env.MONGODB_URI || process.env.MONGO_URI)) {
     await dbReady;
   }
+  const hasApiKey = !!getGeminiApiKey();
+  let apiKeyValid = false;
+  let apiKeyError = null;
+  let keyFormat = null;
+
+  if (hasApiKey) {
+    const validation = await getApiKeyValidation();
+    apiKeyValid = validation.valid;
+    apiKeyError = validation.error || null;
+    keyFormat = validation.keyFormat || null;
+  }
+
   res.json({
-    hasApiKey: !!process.env.GEMINI_API_KEY,
+    hasApiKey,
+    apiKeyValid,
+    apiKeyError,
+    keyFormat,
     isDbConnected,
     environment: isVercel ? 'vercel' : 'local',
   });
@@ -160,8 +192,13 @@ You MUST return your output as a valid JSON object matching the following schema
 
 Ensure your response is valid JSON and contains only the JSON object. Do not wrap it in markdown backticks.`;
 
+    const validation = await validateGeminiApiKey(activeApiKey);
+    if (!validation.valid) {
+      return res.status(401).json({ error: validation.error || 'Invalid GEMINI_API_KEY' });
+    }
+
     console.log('Sending single optimized API call to Gemini...');
-    const rawResponse = await callGeminiAPI(activeApiKey, combinedPrompt, model, 3);
+    const rawResponse = await generateWithGemini(activeApiKey, combinedPrompt, model, 3);
     
     // Parse JSON safely
     const parsedData = parseJsonResponse(rawResponse);
@@ -386,179 +423,6 @@ function parseJsonResponse(text) {
   }
 }
 
-
-let resolvedModel = null;
-let resolvedModelKey = null;
-let resolvedModelsList = null;
-let resolvedModelsListKey = null;
-
-// Get available compatible models for the API Key
-async function getAvailableModels(apiKey) {
-  if (resolvedModelsList && resolvedModelsListKey === apiKey) {
-    return resolvedModelsList;
-  }
-  
-  try {
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1/models?key=${apiKey}`);
-    if (response.ok) {
-      const data = await response.json();
-      const models = data.models || [];
-      
-      const preferences = [
-        'gemini-1.5-flash',
-        'gemini-1.5-flash-latest',
-        'gemini-2.5-flash',
-        'gemini-2.0-flash',
-        'gemini-pro',
-        'gemini-1.5-pro',
-        'gemini-1.5-pro-latest'
-      ];
-      
-      // Filter out only compatible models that can generate content
-      const compatible = models
-        .filter(m => m.supportedGenerationMethods?.includes('generateContent'))
-        .map(m => m.name.split('/').pop());
-      
-      // Sort them such that our preferred/recommended models come first
-      compatible.sort((a, b) => {
-        const idxA = preferences.indexOf(a);
-        const idxB = preferences.indexOf(b);
-        if (idxA !== -1 && idxB !== -1) return idxA - idxB;
-        if (idxA !== -1) return -1;
-        if (idxB !== -1) return 1;
-        return a.localeCompare(b);
-      });
-
-      if (compatible.length > 0) {
-        resolvedModelsList = compatible;
-        resolvedModelsListKey = apiKey;
-        return compatible;
-      }
-    }
-  } catch (err) {
-    console.error('Error listing models:', err);
-  }
-  
-  // Default fallback if listing fails
-  return [
-    'gemini-1.5-flash',
-    'gemini-2.5-flash',
-    'gemini-2.0-flash',
-    'gemini-1.5-pro'
-  ];
-}
-
-// Call Gemini API with dynamic model selection, retry logic, and fallback failover
-async function callGeminiAPI(apiKey, prompt, preferredModel = null, retries = 3) {
-  // Get all compatible models for this API key
-  const availableModels = await getAvailableModels(apiKey);
-  
-  // Build a list of models to try, starting with preferredModel if it's available,
-  // followed by other available models
-  let modelsToTry = [];
-  if (preferredModel && availableModels.includes(preferredModel)) {
-    modelsToTry.push(preferredModel);
-  }
-  
-  // Add other available models to the attempt list
-  for (const model of availableModels) {
-    if (!modelsToTry.includes(model)) {
-      modelsToTry.push(model);
-    }
-  }
-  
-  if (modelsToTry.length === 0) {
-    modelsToTry = ['gemini-1.5-flash', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-pro'];
-  }
-
-  let lastError = null;
-
-  for (const modelName of modelsToTry) {
-    console.log(`🤖 Attempting Gemini API generation with model: ${modelName}`);
-    
-    for (let attempt = 0; attempt < retries; attempt++) {
-      try {
-        const response = await fetch(
-          `https://generativelanguage.googleapis.com/v1/models/${modelName}:generateContent?key=${apiKey}`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              contents: [{ parts: [{ text: prompt }] }],
-              generationConfig: {
-                temperature: 0.4,
-                maxOutputTokens: 2048,
-              },
-            }),
-          }
-        );
-
-        if (!response.ok) {
-          const err = await response.json();
-          const errorMsg = err.error?.message || response.statusText;
-          
-          // Check if it's a quota/rate limit error
-          if (errorMsg.includes('quota') || errorMsg.includes('429') || response.status === 429) {
-            console.warn(`⚠️ Model ${modelName} hit rate limit / quota. Error: ${errorMsg}`);
-            
-            // Check if there is a retry timer in the message (e.g., "Please retry in 59.308030897s")
-            const retryMatch = errorMsg.match(/Please retry in ([\d.]+)s/);
-            if (retryMatch) {
-              const retrySeconds = parseFloat(retryMatch[1]);
-              // If wait is short, wait it out. Otherwise fail immediately to fall back or show timer to user
-              if (retrySeconds < 5 && attempt < retries - 1) {
-                console.log(`Waiting ${retrySeconds}s to retry model ${modelName}...`);
-                await new Promise(r => setTimeout(r, retrySeconds * 1000 + 500));
-                continue;
-              } else {
-                lastError = new Error(errorMsg);
-                break; // Try next model immediately
-              }
-            }
-            
-            if (attempt < retries - 1) {
-              await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
-              continue;
-            }
-          }
-          
-          throw new Error(errorMsg);
-        }
-
-        const data = await response.json();
-        const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-        
-        if (!text || text.trim().length === 0) {
-          if (attempt < retries - 1) {
-            await new Promise(r => setTimeout(r, 1000));
-            continue;
-          }
-          throw new Error('Empty response from Gemini API');
-        }
-        
-        // Save successfully worked model
-        if (!preferredModel) {
-          resolvedModel = modelName;
-          resolvedModelKey = apiKey;
-        }
-        
-        console.log(`🎯 Successfully generated content using model: ${modelName}`);
-        return text;
-      } catch (error) {
-        console.error(`Gemini API error using model ${modelName} (attempt ${attempt + 1}/${retries}):`, error.message);
-        lastError = error;
-        
-        // If it's not a rate-limit/quota error (e.g. invalid API key), fail immediately
-        const msg = error.message.toLowerCase();
-        if (!msg.includes('quota') && !msg.includes('429') && !msg.includes('rate limit')) {
-          throw error;
-        }
-      }
-    }
-  }
-  
-  throw lastError || new Error('All available Gemini models failed or hit rate limits');
-}
 
 // Export as Word document
 app.post('/api/export-docx', async (req, res) => {

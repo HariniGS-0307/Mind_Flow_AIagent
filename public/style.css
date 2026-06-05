@@ -140,7 +140,7 @@ main.container {
 /* API Key banner */
 .server-ready-banner {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 0.6rem;
   background: rgba(34, 197, 94, 0.08);
   border: 1px solid rgba(34, 197, 94, 0.3);
@@ -150,6 +150,13 @@ main.container {
   color: #86efac;
   font-size: 0.95rem;
   font-weight: 500;
+  line-height: 1.5;
+}
+
+.server-error-banner {
+  background: rgba(244, 63, 94, 0.08);
+  border-color: rgba(244, 63, 94, 0.35);
+  color: #fda4af;
 }
 
 .api-key-banner {

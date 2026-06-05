@@ -97,7 +97,7 @@ async def process_video(youtube_url: YouTubeURL):
         )
 
 @app.post("/api/export")
-async export_mindmap(data: Dict[str, Any]):
+async def export_mindmap(data: Dict[str, Any]):
     """Export mindmap/flowchart as JSON"""
     try:
         export_data = {

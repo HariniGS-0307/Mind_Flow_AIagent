@@ -49,14 +49,23 @@ let configReady = false;
 
 const serverReadyBanner = document.getElementById('serverReadyBanner');
 
-function updateApiKeyVisibility() {
+function updateApiKeyVisibility(apiKeyValid = true, apiKeyError = null, apiKeyConfigured = false) {
   if (!apiKeySection) return;
 
-  // Never ask for API key on Vercel — server must provide GEMINI_API_KEY
-  if (isVercelDeployment || hasServerApiKey) {
+  if (isVercelDeployment || apiKeyConfigured || hasServerApiKey) {
     apiKeySection.style.display = 'none';
-    if (serverReadyBanner && hasServerApiKey) {
-      serverReadyBanner.style.display = 'block';
+    if (serverReadyBanner) {
+      if (apiKeyConfigured && apiKeyValid) {
+        serverReadyBanner.className = 'server-ready-banner';
+        serverReadyBanner.innerHTML = '<span>✅</span><span>AI features enabled — no API key needed</span>';
+        serverReadyBanner.style.display = 'flex';
+      } else if (apiKeyConfigured && !apiKeyValid) {
+        serverReadyBanner.className = 'server-ready-banner server-error-banner';
+        serverReadyBanner.innerHTML = `<span>⚠️</span><span>${apiKeyError || 'Server GEMINI_API_KEY is invalid. Create a new key at aistudio.google.com/apikey and update Vercel env vars.'}</span>`;
+        serverReadyBanner.style.display = 'flex';
+      } else {
+        serverReadyBanner.style.display = 'none';
+      }
     }
     return;
   }
@@ -74,17 +83,17 @@ async function checkServerConfig() {
     const res = await fetch('/api/config');
     if (res.ok) {
       const data = await res.json();
-      hasServerApiKey = !!data.hasApiKey;
+      hasServerApiKey = !!data.hasApiKey && !!data.apiKeyValid;
       isDbConnected = !!data.isDbConnected;
       isVercelDeployment = data.environment === 'vercel';
 
-      if (hasServerApiKey) {
+      if (data.hasApiKey) {
         state.apiKey = '';
         localStorage.removeItem('geminiApiKey');
         if (apiKeyInput) apiKeyInput.value = '';
       }
 
-      updateApiKeyVisibility();
+      updateApiKeyVisibility(data.apiKeyValid, data.apiKeyError, !!data.hasApiKey);
 
       if (hasServerApiKey || state.apiKey) {
         loadAvailableModels();
@@ -279,7 +288,7 @@ async function handleFetch() {
   }
 
   if (isVercelDeployment && !hasServerApiKey) {
-    showStatus('⚠️ AI is not configured. Add GEMINI_API_KEY in Vercel → Settings → Environment Variables, then redeploy.', 'error');
+    showStatus('⚠️ GEMINI_API_KEY on Vercel is missing or invalid. Create a new key at aistudio.google.com/apikey → Vercel Settings → Environment Variables → redeploy.', 'error');
     return;
   }
 
@@ -419,6 +428,9 @@ async function generateAIContent(apiKey) {
     console.error('AI generation error:', error);
     if (rateLimitBanner && rateLimitBanner.style.display === 'flex') {
       showStatus(`⚠️ Rate limit active. Please wait for the countdown to complete before retrying.`, 'error');
+      displayBasicContent();
+    } else if (error.message.includes('GEMINI_API_KEY') || error.message.includes('invalid') || error.message.includes('401')) {
+      showStatus(`❌ ${error.message}`, 'error');
       displayBasicContent();
     } else {
       showStatus(`⚠️ AI unavailable (${error.message}). Generating offline summary...`, 'info');
